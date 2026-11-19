@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Deadline Keeper 测试台</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #f4f6f8; color: #17202a; font: 14px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    main { max-width: 1100px; margin: 0 auto; padding: 28px 18px 48px; }
+    header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 22px; }
+    h1 { margin: 0; font-size: 26px; } h2 { margin: 0 0 14px; font-size: 18px; } h3 { margin: 0; font-size: 16px; }
+    button { border: 0; border-radius: 7px; padding: 9px 16px; background: #1769e0; color: white; cursor: pointer; font-weight: 600; }
+    button.secondary { background: #e8edf3; color: #263444; } button:disabled { cursor: wait; opacity: .55; }
+    input, textarea, select { width: 100%; border: 1px solid #ccd5df; border-radius: 6px; padding: 8px 10px; background: white; color: inherit; font: inherit; }
+    textarea { resize: vertical; } label { display: block; margin: 10px 0 4px; color: #526172; font-size: 13px; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; } .panel, .card { background: white; border: 1px solid #e0e6ec; border-radius: 12px; padding: 18px; }
+    .panel { margin-bottom: 16px; } .card { margin: 12px 0; } .fields { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0 14px; }
+    .wide { grid-column: 1 / -1; } .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .muted { color: #687787; } .badge { padding: 2px 8px; border-radius: 10px; background: #e9f1fd; color: #1769e0; font-size: 12px; }
+    #message { margin: 12px 0; white-space: pre-wrap; } .error { color: #b42318; } .success { color: #067647; }
+    #sanitized { max-height: 180px; overflow: auto; padding: 10px; border-radius: 6px; background: #f5f7f9; white-space: pre-wrap; }
+    table { width: 100%; border-collapse: collapse; } th, td { padding: 10px 6px; border-bottom: 1px solid #e7ebef; text-align: left; vertical-align: top; }
+    th { color: #687787; font-size: 12px; } [hidden] { display: none !important; }
+    @media (max-width: 720px) { .grid, .fields { grid-template-columns: 1fr; } .wide { grid-column: auto; } .table-wrap { overflow-x: auto; } }
+  </style>
+</head>
+<body>
+<main>
+  <header><h1>Deadline Keeper 测试台</h1><span id="health" class="badge">检查中</span></header>
+  <div class="grid">
+    <section class="panel">
+      <h2>文字通知</h2>
+      <label for="noticeText">通知内容</label>
+      <textarea id="noticeText" rows="7" placeholder="例如：软件工程课程设计 SE-01，请于 2026 年 11 月 30 日前上传 PDF。"></textarea>
+      <label for="textSourceTime">通知发布时间（可选，不确定时留空）</label>
+      <input id="textSourceTime" type="datetime-local">
+      <div class="row" style="margin-top:14px"><button id="textSubmit">导入并分析</button></div>
+    </section>
+    <section class="panel">
+      <h2>截图通知</h2>
+      <label for="noticeImage">PNG / JPEG 截图</label>
+      <input id="noticeImage" type="file" accept="image/png,image/jpeg">
+      <label for="imageSourceTime">通知发布时间（可选，不确定时留空）</label>
+      <input id="imageSourceTime" type="datetime-local">
+      <div class="row" style="margin-top:14px"><button id="imageSubmit">OCR 并分析</button></div>
+      <p class="muted">图片只用于本地 OCR；发送给模型的是脱敏文本。</p>
+    </section>
+  </div>
+  <div id="message" class="muted">请选择一种方式导入通知。</div>
+
+  <section id="review" class="panel" hidden>
+    <div class="row" style="justify-content:space-between">
+      <h2>分析结果与人工确认</h2><button id="retry" class="secondary" hidden>重试分析</button>
+    </div>
+    <div id="importMeta" class="muted"></div>
+    <label>脱敏正文</label><div id="sanitized"></div>
+    <div id="warnings" class="muted"></div>
+    <div id="drafts"></div>
+  </section>
+
+  <section class="panel">
+    <div class="row" style="justify-content:space-between"><h2>正式任务</h2><button id="refresh" class="secondary">刷新</button></div>
+    <div class="table-wrap"><table>
+      <thead><tr><th>任务</th><th>课程 / 编号</th><th>截止日期</th><th>提交要求</th><th>版本</th></tr></thead>
+      <tbody id="taskRows"></tbody>
+    </table></div>
+  </section>
+</main>
+<script>
+const state = { detail: null };
+const $ = id => document.getElementById(id);
+const message = (text, kind = '') => { $('message').textContent = text; $('message').className = kind; };
+
+async function api(path, options = {}) {
+  const response = await fetch(path, options);
+  const data = await response.json();
+  if (!response.ok) {
+    const error = data.error || {};
+    throw new Error(`${error.message || '请求失败'}${error.code ? `（${error.code}）` : ''}`);
+  }
+  return data;
+}
+
+function jsonOptions(method, body, headers = {}) {
+  return { method, headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body) };
+}
+
+function isoTime(id) { const value = $(id).value; return value ? new Date(value).toISOString() : null; }
+function localTime(value) {
+  if (!value) return '';
+  const date = new Date(value);
+  return new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+}
+function emptyToNull(value) { const trimmed = value.trim(); return trimmed || null; }
+
+async function execute(work) {
+  document.querySelectorAll('button').forEach(button => { button.disabled = true; });
+  try { await work(); } catch (error) { message(error.message, 'error'); }
+  finally { document.querySelectorAll('button').forEach(button => { button.disabled = false; }); }
+}
+
+async function analyzeCurrent() {
+  if (!state.detail) return;
+  message('模型正在分析，请稍候……');
+  try {
+    state.detail = await api(`/api/v1/imports/${state.detail.id}/analyze`, jsonOptions('POST', { expected_version: state.detail.version }));
+    message('分析完成，请检查草稿后确认。', 'success');
+  } catch (error) {
+    state.detail = await api(`/api/v1/imports/${state.detail.id}`);
+    renderImport();
+    throw error;
+  }
+  renderImport();
+}
+
+async function importText() {
+  const text = $('noticeText').value.trim();
+  if (!text) { message('请先填写通知内容。', 'error'); return; }
+  await execute(async () => {
+    message('正在导入文字……');
+    state.detail = await api('/api/v1/imports/text', jsonOptions('POST', { text, source_time: isoTime('textSourceTime') }));
+    await analyzeCurrent();
+  });
+}
+
+async function importImage() {
+  const file = $('noticeImage').files[0];
+  if (!file) { message('请先选择截图。', 'error'); return; }
+  await execute(async () => {
+    message('正在进行本地 OCR，首次识别可能较慢……');
+    const form = new FormData();
+    form.append('file', file);
+    const sourceTime = isoTime('imageSourceTime');
+    if (sourceTime) form.append('source_time', sourceTime);
+    state.detail = await api('/api/v1/imports/image', { method: 'POST', body: form });
+    await analyzeCurrent();
+  });
+}
+
+function inputField(item, key, label, type = 'text', wide = false) {
+  const wrapper = document.createElement('div');
+  if (wide) wrapper.className = 'wide';
+  const caption = document.createElement('label'); caption.textContent = label;
+  const input = document.createElement(key === 'requirements' || key === 'description' ? 'textarea' : 'input');
+  if (input.tagName === 'INPUT') input.type = type;
+  if (key === 'requirements' || key === 'description') input.rows = 2;
+  input.dataset.key = key;
+  input.value = key === 'due_at' ? localTime(item.proposed_task[key]) : (item.proposed_task[key] ?? '');
+  wrapper.append(caption, input);
+  return { wrapper, input };
+}
+
+function actionSelect(item) {
+  const select = document.createElement('select');
+  const initial = { DUPLICATE: 'KEEP', REVIEW: item.matched_task_id ? 'UPDATE' : 'CREATE' }[item.suggested_action] || item.suggested_action;
+  for (const action of ['CREATE', 'UPDATE', 'KEEP', 'SKIP']) {
+    const option = document.createElement('option'); option.value = action; option.textContent = action;
+    option.disabled = (action === 'UPDATE' || action === 'KEEP') && !item.matched_task_id;
+    select.append(option);
+  }
+  select.value = initial;
+  return select;
+}
+
+function renderDraft(item) {
+  const card = document.createElement('div'); card.className = 'card';
+  const heading = document.createElement('div'); heading.className = 'row';
+  const title = document.createElement('h3'); title.textContent = item.proposed_task.title || '待补充标题';
+  const badge = document.createElement('span'); badge.className = 'badge'; badge.textContent = item.suggested_action;
+  heading.append(title, badge); card.append(heading);
+  if (item.match_details.uncertain_fields.length) {
+    const warning = document.createElement('p'); warning.className = 'error';
+    warning.textContent = `待核对字段：${item.match_details.uncertain_fields.join(', ')}`; card.append(warning);
+  }
+  const fields = document.createElement('div'); fields.className = 'fields';
+  const inputs = {};
+  for (const [key, label, type, wide] of [
+    ['title', '任务标题', 'text', false], ['course_name', '课程', 'text', false],
+    ['external_ref', '任务编号', 'text', false], ['due_date', '截止日期', 'date', false],
+    ['due_at', '截止时刻（DATETIME 时填写）', 'datetime-local', false],
+    ['description', '说明', 'text', true], ['requirements', '提交要求', 'text', true],
+  ]) {
+    const field = inputField(item, key, label, type, wide); inputs[key] = field.input; fields.append(field.wrapper);
+  }
+  const kindLabel = document.createElement('label'); kindLabel.textContent = '日期类型';
+  const kind = document.createElement('select'); kind.dataset.key = 'due_kind';
+  for (const value of ['NONE', 'DATE', 'DATETIME']) { const option = document.createElement('option'); option.value = value; option.textContent = value; kind.append(option); }
+  if (item.proposed_task.due_kind === 'UNRESOLVED') {
+    const option = document.createElement('option'); option.value = 'UNRESOLVED'; option.textContent = 'UNRESOLVED（请人工修改）'; kind.append(option);
+  }
+  kind.value = item.proposed_task.due_kind;
+  const kindWrapper = document.createElement('div'); kindWrapper.append(kindLabel, kind); fields.append(kindWrapper);
+  card.append(fields);
+
+  const actionLabel = document.createElement('label'); actionLabel.textContent = '确认操作';
+  const action = actionSelect(item); card.append(actionLabel, action);
+  const controls = document.createElement('div'); controls.className = 'row'; controls.style.marginTop = '12px';
+  const confirm = document.createElement('button'); confirm.textContent = '确认此项'; controls.append(confirm); card.append(controls);
+  const updateDisabled = () => Object.values(inputs).concat(kind).forEach(input => { input.disabled = action.value === 'KEEP' || action.value === 'SKIP'; });
+  action.addEventListener('change', updateDisabled); updateDisabled();
+  confirm.addEventListener('click', () => execute(async () => {
+    const reviewed = { draft_item_id: item.id, action: action.value };
+    if (action.value === 'CREATE' || action.value === 'UPDATE') {
+      reviewed.final_task = {
+        title: inputs.title.value.trim(), description: emptyToNull(inputs.description.value),
+        course_name: emptyToNull(inputs.course_name.value), external_ref: emptyToNull(inputs.external_ref.value),
+        due_kind: kind.value, due_date: inputs.due_date.value || null,
+        due_at: inputs.due_at.value ? new Date(inputs.due_at.value).toISOString() : null,
+        timezone: item.proposed_task.timezone, requirements: emptyToNull(inputs.requirements.value),
+      };
+    }
+    if (action.value === 'UPDATE' || action.value === 'KEEP') {
+      reviewed.target_task_id = item.matched_task_id; reviewed.expected_task_version = item.matched_task_version;
+    }
+    message('正在保存确认结果……');
+    await api(`/api/v1/imports/${state.detail.id}/confirm`, jsonOptions('POST', {
+      expected_import_version: state.detail.version, items: [reviewed],
+    }, { 'Idempotency-Key': crypto.randomUUID() }));
+    state.detail = await api(`/api/v1/imports/${state.detail.id}`);
+    renderImport(); await loadTasks(); message('确认结果已保存。', 'success');
+  }));
+  return card;
+}
+
+function renderImport() {
+  const detail = state.detail;
+  if (!detail) { $('review').hidden = true; return; }
+  $('review').hidden = false;
+  $('importMeta').textContent = `导入 ID：${detail.id}　状态：${detail.status}　版本：${detail.version}　待确认：${detail.pending_count ?? 0}`;
+  $('sanitized').textContent = detail.sanitized_text;
+  $('warnings').textContent = (detail.warnings || []).map(w => `${w.code}: ${w.message}`).join('\n');
+  $('retry').hidden = !['READY', 'FAILED'].includes(detail.status);
+  $('drafts').replaceChildren();
+  const pending = (detail.items || []).filter(item => item.status === 'PENDING');
+  pending.forEach(item => $('drafts').append(renderDraft(item)));
+  if (!pending.length && detail.items?.length) $('drafts').textContent = '本通知的草稿均已处理。';
+}
+
+async function loadTasks() {
+  const data = await api('/api/v1/tasks?page_size=100');
+  $('taskRows').replaceChildren();
+  for (const task of data.items) {
+    const row = document.createElement('tr');
+    for (const value of [task.title, [task.course_name, task.external_ref].filter(Boolean).join(' / '), task.due_at || task.due_date || '无', task.requirements || '', task.version]) {
+      const cell = document.createElement('td'); cell.textContent = value; row.append(cell);
+    }
+    $('taskRows').append(row);
+  }
+  if (!data.items.length) { const row = document.createElement('tr'); const cell = document.createElement('td'); cell.colSpan = 5; cell.textContent = '暂无任务'; row.append(cell); $('taskRows').append(row); }
+}
+
+$('textSubmit').addEventListener('click', importText);
+$('imageSubmit').addEventListener('click', importImage);
+$('retry').addEventListener('click', () => execute(analyzeCurrent));
+$('refresh').addEventListener('click', () => execute(loadTasks));
+api('/health/ready').then(() => { $('health').textContent = '服务正常'; }).catch(() => { $('health').textContent = '服务异常'; });
+loadTasks().catch(error => message(error.message, 'error'));
+</script>
+</body>
+</html>

@@ -53,7 +53,7 @@ def batch_input() -> MatchBatchRequest:
 
 
 class AgentTests(unittest.IsolatedAsyncioTestCase):
-    def mock_agent(self, result, *, status=200, finish="stop", refusal=None):
+    def mock_agent(self, result, *, status=200, finish="stop", refusal=None, settings=SETTINGS):
         calls = []
 
         def handle(request):
@@ -63,7 +63,16 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
                 "choices": [{"finish_reason": finish, "message": {"content": content, "refusal": refusal}}],
             })
 
-        return AgentAdapter(SETTINGS, transport=httpx.MockTransport(handle)), calls
+        return AgentAdapter(settings, transport=httpx.MockTransport(handle)), calls
+
+    async def test_dashscope_disables_thinking(self):
+        settings = AgentSettings("https://dashscope.aliyuncs.com/compatible-mode/v1", "test-only", "qwen3.8-max")
+        agent, calls = self.mock_agent({"tasks": [task()], "warnings": []}, settings=settings)
+        async with agent:
+            await agent.extract_tasks(REQUEST)
+        sent = json.loads(calls[0].content)
+        self.assertIs(sent["enable_thinking"], False)
+        self.assertNotIn("thinking", sent)
 
     async def test_multiple_tasks_missing_timestamp(self):
         quiz = task(
@@ -127,6 +136,25 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         async with agent:
             with self.assertRaisesRegex(LLMInvalidOutput, "relative deadline"):
                 await agent.extract_tasks(req)
+
+    async def test_ocr_line_wraps_in_evidence_are_restored(self):
+        text = "软件工程课程：需求分析报告 SE-02，请\n于 2026 年 11 月 26 日 23:59 前上传课\n程平台。"
+        req = REQUEST.model_copy(update={"sanitized_text": text})
+        output = task(
+            title="需求分析报告", course_name="软件工程", external_ref="SE-02",
+            due_kind="DATETIME", due_date="2026-11-26", due_at="2026-11-26T15:59:00Z",
+            requirements="上传课程平台", source_excerpt="软件工程课程：需求分析报告 SE-02，请于 2026 年 11 月 26 日 23:59 前上传课程平台。",
+        )
+        agent, _ = self.mock_agent({"tasks": [output], "warnings": []})
+        async with agent:
+            result = await agent.extract_tasks(req)
+        self.assertEqual(result.tasks[0].source_excerpt, text)
+
+    async def test_absolute_date_ignores_redundant_source_time_warning(self):
+        agent, _ = self.mock_agent({"tasks": [task()], "warnings": [{"code": "SOURCE_TIME_UNKNOWN", "message": "通知时间未知"}]})
+        async with agent:
+            result = await agent.extract_tasks(REQUEST)
+        self.assertEqual(result.warnings, [])
 
     async def test_invalid_extractions(self):
         for changed in (

@@ -5,9 +5,10 @@ import asyncio
 from contextlib import asynccontextmanager
 import anyio
 from uuid import uuid4
+from pathlib import Path
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 from app.core.current_user import configure_demo_user
@@ -96,6 +97,10 @@ def create_app(engine=None, user_id=None, *, agent=None, ocr=None):
     @app.exception_handler(Exception)
     async def unexpected_error(request, error):
         return error_response(request,'INTERNAL_ERROR','服务内部错误',500)
+
+    @app.get('/', include_in_schema=False)
+    def test_page():
+        return FileResponse(Path(__file__).parent / 'static' / 'index.html')
 
     app.include_router(health.router)
     app.include_router(imports.router)

@@ -29,6 +29,21 @@ REQUIREMENTS_POINTER = re.compile(
 )
 
 
+def _restore_excerpt_whitespace(text: str, excerpt: str) -> str | None:
+    if excerpt in text:
+        return excerpt
+    normalized_excerpt = "".join(excerpt.split())
+    if not normalized_excerpt:
+        return None
+    indexes = [index for index, char in enumerate(text) if not char.isspace()]
+    normalized_text = "".join(text[index] for index in indexes)
+    start = normalized_text.find(normalized_excerpt)
+    if start < 0 or normalized_text.find(normalized_excerpt, start + 1) >= 0:
+        return None
+    end = start + len(normalized_excerpt)
+    return text[indexes[start]:indexes[end - 1] + 1]
+
+
 class AgentError(Exception):
     code = "AGENT_ERROR"
 
@@ -125,8 +140,12 @@ class AgentAdapter:
             EXTRACTION_PROMPT, request.model_dump_json(), ExtractionResult,
         )
         for index, task in enumerate(result.tasks):
-            if task.timezone != request.timezone or task.source_excerpt not in request.sanitized_text:
+            source_excerpt = _restore_excerpt_whitespace(request.sanitized_text, task.source_excerpt)
+            if task.timezone != request.timezone or source_excerpt is None:
                 raise LLMInvalidOutput("Extraction returned an invalid time zone or evidence excerpt")
+            if source_excerpt != task.source_excerpt:
+                task = task.model_copy(update={"source_excerpt": source_excerpt})
+                result.tasks[index] = task
             if (
                 not request.source_time_known and task.due_kind in {"DATE", "DATETIME"}
                 and RELATIVE_DATE.search(task.source_excerpt)
@@ -142,6 +161,9 @@ class AgentAdapter:
                     "uncertain_fields": [name for name in task.uncertain_fields if name != "requirements"],
                 })
 
+        unresolved = [task for task in result.tasks if task.due_kind == "UNRESOLVED"]
+        if not request.source_time_known and not unresolved:
+            result.warnings = [warning for warning in result.warnings if warning.code != "SOURCE_TIME_UNKNOWN"]
         warnings = {warning.code for warning in result.warnings}
         if (
             len(warnings) != len(result.warnings)
@@ -150,7 +172,6 @@ class AgentAdapter:
         ):
             raise LLMInvalidOutput("Extraction returned inconsistent warnings")
 
-        unresolved = [task for task in result.tasks if task.due_kind == "UNRESOLVED"]
         if "SOURCE_TIME_UNKNOWN" in warnings:
             if request.source_time_known or not unresolved:
                 raise LLMInvalidOutput("SOURCE_TIME_UNKNOWN conflicts with extraction context")
@@ -195,8 +216,11 @@ class AgentAdapter:
             "temperature": 0,
             "max_tokens": 16_384,
         }
-        if httpx.URL(endpoint).host == "api.deepseek.com":
+        host = httpx.URL(endpoint).host
+        if host == "api.deepseek.com":
             body["thinking"] = {"type": "disabled"}
+        elif host == "dashscope.aliyuncs.com":
+            body["enable_thinking"] = False
 
         try:
             async with asyncio.timeout(self.settings.timeout_seconds):

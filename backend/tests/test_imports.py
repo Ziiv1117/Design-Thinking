@@ -268,6 +268,8 @@ def test_invalid_agent_output_fails_without_partial_drafts(setup):
 
 def test_ready_and_input_version_validation(setup):
     client, _, _=setup
+    page=client.get('/')
+    assert page.status_code == 200 and 'Deadline Keeper 测试台' in page.text
     assert client.get('/health/live').json()=={'status':'ok'}
     assert client.get('/health/ready').json()=={'status':'ready'}
     created=client.post('/api/v1/imports/text',json={'text':'实验报告','source_time':'2026-11-17T08:00:00'})
